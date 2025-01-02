@@ -1,7 +1,7 @@
 package integration
 
 import (
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +11,11 @@ import (
 	gorestful "github.com/emicklei/go-restful/v3"
 	fasthttprouter "github.com/fasthttp/router"
 	"github.com/gin-gonic/gin"
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/mux"
 	"github.com/julienschmidt/httprouter"
 	"github.com/justinas/alice"
+	"github.com/kataras/iris/v12"
 	"github.com/labstack/echo/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -33,6 +34,7 @@ import (
 	gojimiddleware "github.com/slok/go-http-metrics/middleware/goji"
 	gorestfulmiddleware "github.com/slok/go-http-metrics/middleware/gorestful"
 	httproutermiddleware "github.com/slok/go-http-metrics/middleware/httprouter"
+	irismiddleware "github.com/slok/go-http-metrics/middleware/iris"
 	negronimiddleware "github.com/slok/go-http-metrics/middleware/negroni"
 	stdmiddleware "github.com/slok/go-http-metrics/middleware/std"
 )
@@ -82,6 +84,7 @@ func TestMiddlewarePrometheus(t *testing.T) {
 		"Alice":            {server: prepareHandlerAlice},
 		"Gorilla":          {server: prepareHandlerGorilla},
 		"Fasthttp":         {server: prepareHandlerFastHTTP},
+		"Iris":             {server: prepareHandlerIris},
 	}
 
 	for name, test := range tests {
@@ -125,7 +128,7 @@ func testMiddlewareRequests(t *testing.T, server server, expReqs []handlerConfig
 
 			// Check.
 			assert.Equal(config.Code, resp.StatusCode)
-			b, err := ioutil.ReadAll(resp.Body)
+			b, err := io.ReadAll(resp.Body)
 			require.NoError(err)
 			assert.Equal(config.ReturnData, string(b))
 		}
@@ -147,7 +150,7 @@ func testMiddlewarePrometheusMetrics(t *testing.T, h http.Handler, expMetrics []
 	require.NoError(err)
 
 	// Check.
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	require.NoError(err)
 	metrics := string(b)
 
@@ -381,4 +384,24 @@ func prepareHandlerFastHTTP(m middleware.Middleware, hc []handlerConfig) server 
 	}()
 
 	return netListenerServer{ln: ln}
+}
+
+func prepareHandlerIris(m middleware.Middleware, hc []handlerConfig) server {
+	// Setup server and middleware.
+	app := iris.New()
+	app.Use(irismiddleware.Handler("", m))
+
+	// Set handlers.
+	for _, h := range hc {
+		h := h
+		app.Handle(h.Method, h.Path, iris.Handler(func(ctx iris.Context) {
+			time.Sleep(h.SleepDuration)
+			ctx.StatusCode(h.Code)
+			ctx.WriteString(h.ReturnData) // nolint: errcheck
+		}))
+	}
+
+	app.Build() // nolint: errcheck
+
+	return testServer{server: httptest.NewServer(app)}
 }

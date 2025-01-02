@@ -1,4 +1,4 @@
-package std_test
+package iris_test
 
 import (
 	"io"
@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/kataras/iris/v12"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -13,7 +14,7 @@ import (
 	mmetrics "github.com/slok/go-http-metrics/internal/mocks/metrics"
 	"github.com/slok/go-http-metrics/metrics"
 	"github.com/slok/go-http-metrics/middleware"
-	stdmiddleware "github.com/slok/go-http-metrics/middleware/std"
+	irismiddleware "github.com/slok/go-http-metrics/middleware/iris"
 )
 
 func TestMiddleware(t *testing.T) {
@@ -22,11 +23,42 @@ func TestMiddleware(t *testing.T) {
 		config      middleware.Config
 		req         func() *http.Request
 		mock        func(m *mmetrics.Recorder)
-		handler     func() http.Handler
+		handler     func() iris.Handler
 		expRespCode int
 		expRespBody string
 	}{
 		"A default HTTP middleware should call the recorder to measure.": {
+			req: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/test", nil)
+			},
+			mock: func(m *mmetrics.Recorder) {
+				expHTTPReqProps := metrics.HTTPReqProperties{
+					ID:      "/test",
+					Service: "",
+					Method:  "POST",
+					Code:    "202",
+				}
+				m.On("ObserveHTTPRequestDuration", mock.Anything, expHTTPReqProps, mock.Anything).Once()
+				m.On("ObserveHTTPResponseSize", mock.Anything, expHTTPReqProps, int64(5)).Once()
+
+				expHTTPProps := metrics.HTTPProperties{
+					ID:      "/test",
+					Service: "",
+				}
+				m.On("AddInflightRequests", mock.Anything, expHTTPProps, 1).Once()
+				m.On("AddInflightRequests", mock.Anything, expHTTPProps, -1).Once()
+			},
+			handler: func() iris.Handler {
+				return func(ctx iris.Context) {
+					ctx.StatusCode(iris.StatusAccepted)
+					_, _ = ctx.WriteString("test1")
+				}
+			},
+			expRespCode: 202,
+			expRespBody: "test1",
+		},
+
+		"A default HTTP middleware using JSON should call the recorder to measure (Regression test: https://github.com/slok/go-http-metrics/issues/31).": {
 			req: func() *http.Request {
 				return httptest.NewRequest(http.MethodPost, "/test", nil)
 			},
@@ -47,14 +79,14 @@ func TestMiddleware(t *testing.T) {
 				m.On("AddInflightRequests", mock.Anything, expHTTPProps, 1).Once()
 				m.On("AddInflightRequests", mock.Anything, expHTTPProps, -1).Once()
 			},
-			handler: func() http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(202)
-					w.Write([]byte("Я бэтмен")) // nolint: errcheck
-				})
+			handler: func() iris.Handler {
+				return func(ctx iris.Context) {
+					ctx.StatusCode(iris.StatusAccepted)
+					ctx.JSON(map[string]string{"test": "one"}) // nolint: errcheck
+				}
 			},
 			expRespCode: 202,
-			expRespBody: "Я бэтмен",
+			expRespBody: "{\"test\":\"one\"}\n",
 		},
 	}
 
@@ -67,85 +99,19 @@ func TestMiddleware(t *testing.T) {
 			mr := &mmetrics.Recorder{}
 			test.mock(mr)
 
-			// Create our negroni instance with the middleware.
-			test.config.Recorder = mr
-			m := middleware.New(test.config)
-			h := stdmiddleware.Handler(test.handlerID, m, test.handler())
+			// Create our instance with the middleware.
+			mdlw := middleware.New(middleware.Config{Recorder: mr})
+			app := iris.New().Configure(iris.WithOptimizations)
+			req := test.req()
+			app.Handle(req.Method, req.URL.Path,
+				irismiddleware.Handler(test.handlerID, mdlw),
+				test.handler())
 
 			// Make the request.
 			resp := httptest.NewRecorder()
-			h.ServeHTTP(resp, test.req())
-
-			// Check.
-			mr.AssertExpectations(t)
-			assert.Equal(test.expRespCode, resp.Result().StatusCode)
-			gotBody, err := io.ReadAll(resp.Result().Body)
+			err := app.Build()
 			require.NoError(err)
-			assert.Equal(test.expRespBody, string(gotBody))
-		})
-	}
-}
-
-func TestProvider(t *testing.T) {
-	tests := map[string]struct {
-		handlerID   string
-		config      middleware.Config
-		req         func() *http.Request
-		mock        func(m *mmetrics.Recorder)
-		handler     func() http.Handler
-		expRespCode int
-		expRespBody string
-	}{
-		"A default HTTP middleware should call the recorder to measure.": {
-			req: func() *http.Request {
-				return httptest.NewRequest(http.MethodPost, "/test", nil)
-			},
-			mock: func(m *mmetrics.Recorder) {
-				expHTTPReqProps := metrics.HTTPReqProperties{
-					ID:      "/test",
-					Service: "",
-					Method:  "POST",
-					Code:    "202",
-				}
-				m.On("ObserveHTTPRequestDuration", mock.Anything, expHTTPReqProps, mock.Anything).Once()
-				m.On("ObserveHTTPResponseSize", mock.Anything, expHTTPReqProps, int64(15)).Once()
-
-				expHTTPProps := metrics.HTTPProperties{
-					ID:      "/test",
-					Service: "",
-				}
-				m.On("AddInflightRequests", mock.Anything, expHTTPProps, 1).Once()
-				m.On("AddInflightRequests", mock.Anything, expHTTPProps, -1).Once()
-			},
-			handler: func() http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(202)
-					w.Write([]byte("Я бэтмен")) // nolint: errcheck
-				})
-			},
-			expRespCode: 202,
-			expRespBody: "Я бэтмен",
-		},
-	}
-
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			assert := assert.New(t)
-			require := require.New(t)
-
-			// Mocks.
-			mr := &mmetrics.Recorder{}
-			test.mock(mr)
-
-			// Create our negroni instance with the middleware.
-			test.config.Recorder = mr
-			m := middleware.New(test.config)
-			provider := stdmiddleware.HandlerProvider(test.handlerID, m)
-			h := provider(test.handler())
-
-			// Make the request.
-			resp := httptest.NewRecorder()
-			h.ServeHTTP(resp, test.req())
+			app.ServeHTTP(resp, req)
 
 			// Check.
 			mr.AssertExpectations(t)

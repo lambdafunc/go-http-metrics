@@ -6,13 +6,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/kataras/iris/v12"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	metrics "github.com/slok/go-http-metrics/metrics/prometheus"
 	"github.com/slok/go-http-metrics/middleware"
-	"github.com/slok/go-http-metrics/middleware/std"
+	irismiddleware "github.com/slok/go-http-metrics/middleware/iris"
 )
 
 const (
@@ -26,25 +25,35 @@ func main() {
 		Recorder: metrics.NewRecorder(metrics.Config{}),
 	})
 
-	// Create our router with the metrics middleware.
-	r := chi.NewRouter()
-	r.Use(std.HandlerProvider("", mdlw))
+	// Create Iris engine and global middleware.
+	app := iris.New()
+	app.Use(irismiddleware.Handler("", mdlw))
 
-	// Add paths.
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(200 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
+	// Add our handler.
+	app.Get("/", func(ctx iris.Context) {
+		ctx.StatusCode(iris.StatusAccepted)
+		_, _ = ctx.WriteString("Hello world!")
 	})
-	r.Get("/test1", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusCreated) })
-	r.Get("/test1/test2", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
-	r.Get("/test1/test4", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNonAuthoritativeInfo) })
-	r.Get("/test2", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	r.Get("/test3", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusResetContent) })
+
+	app.Get("/json", func(ctx iris.Context) {
+		ctx.JSON(map[string]string{"hello": "world"}) // nolint: errcheck
+	})
+
+	app.Get("/wrong", func(ctx iris.Context) {
+		ctx.StatusCode(iris.StatusTooManyRequests)
+		_, _ = ctx.WriteString("oops")
+
+	})
+
+	err := app.Build()
+	if err != nil {
+		panic(err)
+	}
 
 	// Serve our handler.
 	go func() {
 		log.Printf("server listening at %s", srvAddr)
-		if err := http.ListenAndServe(srvAddr, r); err != nil {
+		if err := http.ListenAndServe(srvAddr, app); err != nil {
 			log.Panicf("error while serving: %s", err)
 		}
 	}()
